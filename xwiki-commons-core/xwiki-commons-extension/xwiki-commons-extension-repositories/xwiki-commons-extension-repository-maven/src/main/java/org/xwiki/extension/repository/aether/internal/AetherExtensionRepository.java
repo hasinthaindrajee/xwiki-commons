@@ -21,7 +21,10 @@ package org.xwiki.extension.repository.aether.internal;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.net.InetSocketAddress;
 import java.net.MalformedURLException;
+import java.net.ProxySelector;
+import java.net.URI;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -34,12 +37,15 @@ import org.apache.maven.model.Developer;
 import org.apache.maven.model.License;
 import org.apache.maven.model.Model;
 import org.codehaus.plexus.component.repository.exception.ComponentLookupException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.sonatype.aether.RepositorySystemSession;
 import org.sonatype.aether.artifact.Artifact;
 import org.sonatype.aether.artifact.ArtifactTypeRegistry;
 import org.sonatype.aether.graph.Dependency;
 import org.sonatype.aether.impl.ArtifactDescriptorReader;
 import org.sonatype.aether.impl.VersionRangeResolver;
+import org.sonatype.aether.repository.Proxy;
 import org.sonatype.aether.repository.RemoteRepository;
 import org.sonatype.aether.resolution.ArtifactDescriptorRequest;
 import org.sonatype.aether.resolution.ArtifactDescriptorResult;
@@ -97,6 +103,8 @@ public class AetherExtensionRepository extends AbstractExtensionRepository
 
     private static Method convertMethod;
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(AetherExtensionRepository.class);
+
     private transient ComponentManager componentManager;
 
     private transient PlexusComponentManager plexusComponentManager;
@@ -125,6 +133,13 @@ public class AetherExtensionRepository extends AbstractExtensionRepository
 
         this.remoteRepository = new RemoteRepository(repositoryId.getId(), "default", repositoryId.getURI().toString());
 
+        // Proxy
+        try {
+            this.remoteRepository.setProxy(determineProxy(repositoryId.getURI()));
+        } catch (Exception e) {
+            LOGGER.warn("Unexpected exception when trying to find a proxy for [{}]", repositoryId.getURI());
+        }
+
         this.converter = this.componentManager.getInstance(ConverterManager.class);
         this.licenseManager = this.componentManager.getInstance(ExtensionLicenseManager.class);
 
@@ -137,11 +152,9 @@ public class AetherExtensionRepository extends AbstractExtensionRepository
                 // FIXME: not very nice
                 // * use a private method of a library we don't control is not the nicest thing. But it's a big and very
                 // uselfull method. A shame is not a bit more public.
-                // * having to parse the pom.xml since we are supposed to support anything supported by aether is not
-                // very
-                // clean
-                // either. But Aether almost resolve nothing, not even the type of the artifact, we pretty much get only
-                // dependencies and licenses.
+                // * having to parse the pom.xml since we are supposed to support anything supported by AETHER is not
+                // very clean either. But AETHER almost resolve nothing, not even the type of the artifact, we pretty
+                // much get only dependencies and licenses.
                 loadPomMethod =
                     this.mavenDescriptorReader.getClass().getDeclaredMethod("loadPom", RepositorySystemSession.class,
                         ArtifactDescriptorRequest.class, ArtifactDescriptorResult.class);
@@ -154,6 +167,44 @@ public class AetherExtensionRepository extends AbstractExtensionRepository
         } catch (ComponentLookupException e) {
             // Maven handler not found
         }
+    }
+
+    private Proxy determineProxy(URI targetURI)
+    {
+        // There is obviously no proxy need to filesystem repository
+        if (targetURI.getScheme().equals("file")) {
+            return null;
+        }
+
+        // the proxy selector can be 'unset', so we better deal with null here
+        ProxySelector psel = ProxySelector.getDefault();
+
+        if (psel == null) {
+            return null;
+        }
+
+        List<java.net.Proxy> proxies = psel.select(targetURI);
+
+        if (proxies == null || proxies.isEmpty()) {
+            return null;
+        }
+
+        java.net.Proxy javaProxy = proxies.get(0);
+
+        Proxy result = null;
+        if (javaProxy.type() == java.net.Proxy.Type.HTTP) {
+            // convert the socket address to an HttpHost
+            if (javaProxy.address() instanceof InetSocketAddress) {
+                final InetSocketAddress isa = (InetSocketAddress) javaProxy.address();
+
+                // TODO: Where to get the user/password ?
+                result = new Proxy(targetURI.getScheme(), isa.getHostName(), isa.getPort(), null);
+            } else {
+                LOGGER.warn("Unsupported proxy {}", javaProxy);
+            }
+        }
+
+        return result;
     }
 
     protected RepositorySystemSession createRepositorySystemSession()
